@@ -8045,6 +8045,7 @@ dependencies = [
  "re_tracing",
  "re_ui",
  "re_view",
+ "re_view_state_timeline",
  "re_viewer_context",
  "re_viewport_blueprint",
  "smallvec",

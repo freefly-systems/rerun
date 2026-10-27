@@ -191,6 +191,9 @@ impl ViewClass for TimeSeriesView {
 
         system_registry.register_visualizer::<SeriesLinesSystem>()?;
         system_registry.register_visualizer::<SeriesPointsSystem>()?;
+        // Pulsar: StateChange entities in a chart paint as labelled time regions
+        // behind it. Same visualizer type as the state timeline view.
+        system_registry.register_visualizer::<re_view_state_timeline::StateVisualizer>()?;
         Ok(())
     }
 
@@ -328,6 +331,16 @@ impl ViewClass for TimeSeriesView {
                 })
                 .collect(),
         );
+
+        // Pulsar: a StateChange entity in the view becomes background regions.
+        let state_visualizer = re_view_state_timeline::StateVisualizer::identifier();
+        if available_visualizers.contains_key(&state_visualizer)
+            && indicated_entities_per_visualizer
+                .get(&state_visualizer)
+                .is_some_and(|entities| entities.contains(entity_path))
+        {
+            recommended.insert(state_visualizer, Default::default(), true);
+        }
 
         // If there were no other visualizers, but the SeriesLineSystem is available, use it.
         if recommended.all_recommendations().is_empty()
@@ -467,6 +480,14 @@ impl ViewClass for TimeSeriesView {
         let all_plot_series: Vec<_> =
             chain!(&line_series.all_series, &point_series.all_series).collect();
 
+        let region_lanes: Vec<re_view_state_timeline::StateLane> = system_output
+            .iter_visualizer_data::<re_view_state_timeline::StateLanesData>()
+            .flat_map(|data| data.lanes.iter().cloned())
+            .collect();
+
+        // Pulsar: each series' source component, for the readout's raw-sample query.
+        let mut series_sources: HashMap<_, (ComponentIdentifier, bool)> = HashMap::default();
+
         state.num_time_series_last_frame_per_instruction.clear();
 
         let view_query_result = ctx.lookup_query_result(query.view_id);
@@ -500,6 +521,7 @@ impl ViewClass for TimeSeriesView {
                         })
                         .unwrap_or((scalar_component, String::new()));
 
+                    series_sources.insert(instruction_id, (component, selector.is_empty()));
                     series_names.insert(
                         instruction_id,
                         SeriesInfo::new(data_result.entity_path.clone(), component, &selector),
@@ -842,6 +864,8 @@ impl ViewClass for TimeSeriesView {
                 );
             }
 
+            paint_region_lanes(ui, &response, &transform, time_offset, &region_lanes);
+
             // Render re_renderer draw data (already in screen space) via ViewBuilder.
             render_re_renderer_draw_data(ctx, ui, &response, re_renderer_draw_data);
 
@@ -886,10 +910,14 @@ impl ViewClass for TimeSeriesView {
             // instant, the hovered time in any Pulsar chart, else the time cursor.
             update_shared_hover(ui, &response, &transform, time_offset);
             paint_pulsar_readout(
+                ctx,
                 ui,
                 &response,
                 &transform,
                 &all_plot_series,
+                &series_sources,
+                *timeline.name(),
+                state.time_per_pixel,
                 time_offset,
                 time_type,
                 timestamp_format,
@@ -1489,10 +1517,14 @@ fn shared_hover_time(ui: &egui::Ui) -> Option<i64> {
 /// taken from aggregated points, which happens when zoomed out.
 #[expect(clippy::too_many_arguments)]
 fn paint_pulsar_readout(
+    ctx: &ViewerContext<'_>,
     ui: &egui::Ui,
     response: &egui::Response,
     transform: &egui_plot::PlotTransform,
     all_plot_series: &[&crate::PlotSeries],
+    series_sources: &HashMap<re_sdk_types::blueprint::components::VisualizerInstructionId, (ComponentIdentifier, bool)>,
+    timeline: re_log_types::TimelineName,
+    time_per_pixel: f64,
     time_offset: i64,
     time_type: TimeType,
     timestamp_format: re_log_types::TimestampFormat,
@@ -1550,9 +1582,24 @@ fn paint_pulsar_readout(
         } else {
             i
         };
-        let (sample_time, value) = points[i];
-        let aggregated =
+        let plotted = points[i];
+        let downsampled =
             series.aggregator != AggregationPolicy::Off && series.aggregation_factor > 1.0;
+
+        // Plotted points are raw samples unless the series is downsampled. Then
+        // the nearest raw sample sits within a few pixels of the readout time.
+        let raw = downsampled
+            .then(|| series_sources.get(&series.visualizer_instruction_id))
+            .flatten()
+            .filter(|(component, no_selector)| {
+                *no_selector && *component == Scalars::descriptor_scalars().component
+            })
+            .and_then(|(component, _)| {
+                let window = (time_per_pixel * 3.0).ceil() as i64 + 1;
+                nearest_raw_sample(ctx, timeline, series, *component, time, window)
+            });
+        let aggregated = downsampled && raw.is_none();
+        let (sample_time, value) = raw.unwrap_or(plotted);
 
         job.append("   ", 0.0, egui::TextFormat::simple(font.clone(), weak));
         job.append(&series.label, 0.0, egui::TextFormat::simple(font.clone(), series.color));
@@ -1579,6 +1626,93 @@ fn paint_pulsar_readout(
     let bg = egui::Rect::from_min_size(pos, galley.size()).expand(3.0);
     painter.rect_filled(bg, 3.0, ui.visuals().extreme_bg_color.gamma_multiply(0.85));
     painter.galley(pos, galley, strong);
+}
+
+/// The raw sample of `series` nearest `time`, from a range query of `window`
+/// either side. `None` when no sample falls in the window.
+fn nearest_raw_sample(
+    ctx: &ViewerContext<'_>,
+    timeline: re_log_types::TimelineName,
+    series: &crate::PlotSeries,
+    component: ComponentIdentifier,
+    time: i64,
+    window: i64,
+) -> Option<(i64, f64)> {
+    let query = re_chunk_store::RangeQuery::new(
+        timeline,
+        AbsoluteTimeRange::new(time.saturating_sub(window), time.saturating_add(window)),
+    );
+    let engine = ctx.recording_engine();
+    let results = engine.cache().range(
+        re_chunk_store::ChunkTrackingMode::Ignore,
+        &query,
+        &series.instance_path.entity_path,
+        [component],
+    );
+    let instance = series.instance_path.instance;
+    let index = if instance.is_specific() { instance.get() as usize } else { 0 };
+
+    let mut best: Option<(i64, f64)> = None;
+    for chunk in results.get(component)? {
+        for ((t, _row), values) in std::iter::zip(
+            chunk.iter_component_indices(timeline, component),
+            chunk.iter_slices::<f64>(component),
+        ) {
+            let (t, Some(&value)) = (t.as_i64(), values.get(index)) else {
+                continue;
+            };
+            if best.is_none_or(|(bt, _)| t.abs_diff(time) < bt.abs_diff(time)) {
+                best = Some((t, value));
+            }
+        }
+    }
+    best
+}
+
+/// Paint each drawn phase of the given state lanes as a translucent band over
+/// the plot's full height, with its label at the bottom left: Pulsar's labelled
+/// time regions on check charts.
+fn paint_region_lanes(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    transform: &egui_plot::PlotTransform,
+    time_offset: i64,
+    lanes: &[re_view_state_timeline::StateLane],
+) {
+    let plot = response.rect;
+    let painter = ui.painter().with_clip_rect(plot);
+    let x_of = |t: i64| {
+        transform
+            .position_from_point(&PlotPoint::new(t.saturating_sub(time_offset) as f64, 0.0))
+            .x
+    };
+    for lane in lanes {
+        for (i, phase) in lane.phases.iter().enumerate() {
+            let Some(content) = &phase.content else {
+                continue;
+            };
+            let x0 = x_of(phase.start_time).max(plot.left());
+            let x1 = lane
+                .phases
+                .get(i + 1)
+                .map_or(plot.right(), |next| x_of(next.start_time))
+                .min(plot.right());
+            if x1 <= x0 {
+                continue;
+            }
+            let band = egui::Rect::from_x_y_ranges(x0..=x1, plot.y_range());
+            painter.rect_filled(band, 0.0, content.color.gamma_multiply(0.16));
+            if band.width() > 24.0 {
+                painter.text(
+                    band.left_bottom() + egui::vec2(4.0, -16.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    &content.label,
+                    egui::FontId::proportional(11.0),
+                    content.color,
+                );
+            }
+        }
+    }
 }
 
 /// Four significant digits, like Pulsar's legend; scientific outside 1e-3..1e5.
