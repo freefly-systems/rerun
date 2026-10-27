@@ -1670,8 +1670,7 @@ fn nearest_raw_sample(
 }
 
 /// Paint each drawn phase of the given state lanes as a translucent band over
-/// the plot's full height, with its label at the bottom left: Pulsar's labelled
-/// time regions on check charts.
+/// the plot's full height: Pulsar's labelled time regions on check charts.
 fn paint_region_lanes(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -1681,6 +1680,8 @@ fn paint_region_lanes(
 ) {
     let plot = response.rect;
     let painter = ui.painter().with_clip_rect(plot);
+    let pointer = response.hover_pos();
+    let mut hovered_label: Option<&str> = None;
     let x_of = |t: i64| {
         transform
             .position_from_point(&PlotPoint::new(t.saturating_sub(time_offset) as f64, 0.0))
@@ -1702,16 +1703,31 @@ fn paint_region_lanes(
             }
             let band = egui::Rect::from_x_y_ranges(x0..=x1, plot.y_range());
             painter.rect_filled(band, 0.0, content.color.gamma_multiply(0.16));
-            if band.width() > 24.0 {
-                painter.text(
-                    band.left_bottom() + egui::vec2(4.0, -16.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    &content.label,
-                    egui::FontId::proportional(11.0),
-                    content.color,
-                );
+            if band.contains(pointer.unwrap_or(egui::Pos2::NAN)) {
+                hovered_label = Some(content.label.as_str());
             }
         }
+    }
+
+    // As in Pulsar, the region's label shows only on Ctrl/Cmd-hover, as a tooltip.
+    if let (Some(label), Some(pos)) = (hovered_label, pointer)
+        && ui.input(|i| i.modifiers.command)
+    {
+        let galley = painter.layout_no_wrap(
+            label.to_owned(),
+            egui::FontId::monospace(10.0),
+            ui.visuals().strong_text_color(),
+        );
+        let at = pos + egui::vec2(12.0, -galley.size().y - 8.0);
+        let bg = egui::Rect::from_min_size(at, galley.size()).expand2(egui::vec2(6.0, 2.0));
+        painter.rect(
+            bg,
+            4.0,
+            ui.visuals().window_fill,
+            ui.visuals().window_stroke,
+            egui::StrokeKind::Outside,
+        );
+        painter.galley(at, galley, ui.visuals().strong_text_color());
     }
 }
 
