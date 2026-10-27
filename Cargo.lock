@@ -8017,6 +8017,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulsar_view_time_series"
+version = "0.34.1"
+dependencies = [
+ "ahash",
+ "arrayvec",
+ "egui",
+ "egui_plot",
+ "glam",
+ "itertools 0.14.0",
+ "macaw",
+ "nohash-hasher",
+ "rayon",
+ "re_byte_size",
+ "re_chunk",
+ "re_chunk_store",
+ "re_component_ui",
+ "re_format",
+ "re_log",
+ "re_log_types",
+ "re_plot",
+ "re_query",
+ "re_renderer",
+ "re_sdk_types",
+ "re_test_context",
+ "re_test_viewport",
+ "re_tracing",
+ "re_ui",
+ "re_view",
+ "re_viewer_context",
+ "re_viewport_blueprint",
+ "smallvec",
+ "vec1",
+]
+
+[[package]]
 name = "pyo3"
 version = "0.28.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10704,6 +10739,7 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "poll-promise",
+ "pulsar_view_time_series",
  "rayon",
  "re_analytics",
  "re_auth",

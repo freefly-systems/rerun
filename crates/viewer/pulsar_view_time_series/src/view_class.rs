@@ -1557,7 +1557,7 @@ fn paint_pulsar_readout(
         job.append("   ", 0.0, egui::TextFormat::simple(font.clone(), weak));
         job.append(&series.label, 0.0, egui::TextFormat::simple(font.clone(), series.color));
         job.append(
-            &format!(" {}{}", if aggregated { "~" } else { "" }, re_format::format_f64(value)),
+            &format!(" {}{}", if aggregated { "~" } else { "" }, compact_value(value)),
             0.0,
             egui::TextFormat::simple(font.clone(), strong),
         );
@@ -1579,6 +1579,22 @@ fn paint_pulsar_readout(
     let bg = egui::Rect::from_min_size(pos, galley.size()).expand(3.0);
     painter.rect_filled(bg, 3.0, ui.visuals().extreme_bg_color.gamma_multiply(0.85));
     painter.galley(pos, galley, strong);
+}
+
+/// Four significant digits, like Pulsar's legend; scientific outside 1e-3..1e5.
+fn compact_value(v: f64) -> String {
+    if !v.is_finite() {
+        return format!("{v}");
+    }
+    if v == 0.0 {
+        return "0".to_owned();
+    }
+    let a = v.abs();
+    if !(1e-3..1e5).contains(&a) {
+        return format!("{v:.3e}");
+    }
+    let decimals = (3 - a.log10().floor() as i32).max(0) as usize;
+    format!("{v:.decimals$}")
 }
 
 fn paint_time_cursor(
