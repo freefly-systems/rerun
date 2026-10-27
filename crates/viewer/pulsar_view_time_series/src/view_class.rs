@@ -84,6 +84,9 @@ pub struct TimeSeriesViewState {
     /// This avoids relying on `egui_plot::PlotMemory` keyed by view id, which breaks
     /// when the same blueprint view is shown multiple times.
     pub time_per_pixel: f64,
+
+    /// Pulsar: the stat card the user clicked, if any.
+    pub pulsar_active_card: Option<usize>,
 }
 
 impl Default for TimeSeriesViewState {
@@ -96,6 +99,7 @@ impl Default for TimeSeriesViewState {
             num_time_series_last_frame_per_instruction: Default::default(),
             plot_transform: None,
             time_per_pixel: 1.0,
+            pulsar_active_card: None,
         }
     }
 }
@@ -196,6 +200,8 @@ impl ViewClass for TimeSeriesView {
         system_registry.register_visualizer::<re_view_state_timeline::StateVisualizer>()?;
         // Pulsar: y-ranges (a check's accepted band) painted behind the lines.
         system_registry.register_visualizer::<crate::y_bands::YBandsSystem>()?;
+        // Pulsar: a check's stat cards, in a bar under the chart.
+        system_registry.register_visualizer::<crate::check_stats::CheckStatsSystem>()?;
         Ok(())
     }
 
@@ -347,6 +353,14 @@ impl ViewClass for TimeSeriesView {
         if available_visualizers.contains_key(&y_bands) {
             recommended.insert(y_bands, Default::default(), true);
         }
+        let check_stats = crate::check_stats::CheckStatsSystem::identifier();
+        if available_visualizers.contains_key(&check_stats)
+            && indicated_entities_per_visualizer
+                .get(&check_stats)
+                .is_some_and(|entities| entities.contains(entity_path))
+        {
+            recommended.insert(check_stats, Default::default(), true);
+        }
 
         // If there were no other visualizers, but the SeriesLineSystem is available, use it.
         if recommended.all_recommendations().is_empty()
@@ -495,6 +509,14 @@ impl ViewClass for TimeSeriesView {
             .iter_visualizer_data::<crate::y_bands::YBandsData>()
             .flat_map(|data| data.bands.iter().cloned())
             .collect();
+
+        let check_cards: Vec<crate::check_stats::StatCard> = system_output
+            .iter_visualizer_data::<crate::check_stats::CheckStatsData>()
+            .flat_map(|data| data.cards.iter().cloned())
+            .collect();
+        if state.pulsar_active_card.is_some_and(|i| i >= check_cards.len()) {
+            state.pulsar_active_card = None;
+        }
 
         // Pulsar: each series' source component, for the readout's raw-sample query.
         let mut series_sources: HashMap<_, (ComponentIdentifier, bool)> = HashMap::default();
@@ -786,6 +808,13 @@ impl ViewClass for TimeSeriesView {
             // Sharing the same cursor is always nice:
             plot = plot.link_cursor(timeline.name().as_str(), [true; 2]);
 
+            // Pulsar: leave room under the plot for the check's stat bar.
+            if !check_cards.is_empty() {
+                plot = plot.height(
+                    (ui.available_height() - crate::check_stats::BAR_HEIGHT).max(40.0),
+                );
+            }
+
             // Legend is rendered separately after plot.show() using our LegendWidget.
 
             match timeline.typ() {
@@ -891,6 +920,28 @@ impl ViewClass for TimeSeriesView {
 
             // Render re_renderer draw data (already in screen space) via ViewBuilder.
             render_re_renderer_draw_data(ctx, ui, &response, re_renderer_draw_data);
+
+            // Pulsar: the active stat card's violations or threshold line, on top.
+            if let Some(card) = state.pulsar_active_card.and_then(|i| check_cards.get(i)) {
+                let to_screen = |t: i64, v: f64| {
+                    transform.position_from_point(&PlotPoint::new(
+                        t.saturating_sub(time_offset) as f64,
+                        v,
+                    ))
+                };
+                crate::check_stats::paint_violations(ui, response.rect, to_screen, card);
+                if let Some(line) = all_plot_series
+                    .iter()
+                    .find(|s| !card.hline_ref.is_empty() && s.label == card.hline_ref)
+                    && let Some(&(_, y)) = line.points.first()
+                {
+                    crate::check_stats::paint_highlighted_hline(
+                        ui,
+                        response.rect,
+                        transform.position_from_point(&PlotPoint::new(0.0, y)).y,
+                    );
+                }
+            }
 
             // Custom hover detection: find nearest actual data point and show tooltip.
             let hovered_data_result = (!legend_hovered)
@@ -1082,6 +1133,11 @@ impl ViewClass for TimeSeriesView {
 
                 let hidden_items = legend_output.hidden_ids;
                 update_series_visibility_from_legend(ctx, query, &all_plot_series, &hidden_items);
+            }
+
+            // Pulsar: the check's stat bar, under the plot.
+            if !check_cards.is_empty() {
+                crate::check_stats::stat_bar_ui(ui, &check_cards, &mut state.pulsar_active_card);
             }
 
             Ok(())
