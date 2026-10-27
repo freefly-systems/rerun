@@ -323,6 +323,14 @@ impl ViewClass for TimeSeriesView {
             available_visualizers
                 .iter()
                 .filter_map(|(visualizer, reason)| {
+                    // Pulsar: one instruction per scalar source is right for the
+                    // series visualizers only. For Pulsar's own (threshold lines
+                    // have several Scalar fields) it would duplicate the entity.
+                    if *visualizer != SeriesLinesSystem::identifier()
+                        && *visualizer != SeriesPointsSystem::identifier()
+                    {
+                        return None;
+                    }
                     // Filter out entities that weren't indicated.
                     // We later fall back on to line visualizers for those.
                     if indicated_entities_per_visualizer
