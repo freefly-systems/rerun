@@ -1856,9 +1856,15 @@ fn update_shared_hover(
     {
         let time = time_offset.saturating_add(transform.value_from_position(pos).x.round() as i64);
         let pass = ui.ctx().cumulative_pass_nr();
+        let previous = ui.ctx().data(|d| d.get_temp::<SharedHover>(shared_hover_id()));
         ui.ctx()
             .data_mut(|d| d.insert_temp(shared_hover_id(), SharedHover { time, pass }));
-        ui.ctx().request_repaint();
+        // One more frame lets views drawn earlier in this one catch up. Only when the hover
+        // time moved, or was stale: an unconditional repaint keeps the viewer redrawing at
+        // the display rate for as long as the pointer rests on a chart.
+        if previous.is_none_or(|p| p.time != time || p.pass + 1 < pass) {
+            ui.ctx().request_repaint();
+        }
     }
 }
 

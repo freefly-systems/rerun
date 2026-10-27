@@ -174,6 +174,32 @@ pub fn points_to_series(
     );
 }
 
+/// Pulsar: like [`points_to_series`], for points already reduced to about one bucket per
+/// pixel by the series cache's pyramid, so the per-pixel aggregation pass is skipped.
+/// `aggregation_factor` is samples per emitted point, which the readout uses to tell
+/// plotted from raw values.
+#[expect(clippy::too_many_arguments)]
+pub fn points_to_series_preaggregated(
+    run: SeriesProperties,
+    points: Vec<PlotPoint>,
+    aggregation_factor: f64,
+    store: &re_chunk_store::ChunkStore,
+    query: &ViewQuery<'_>,
+    aggregator: AggregationPolicy,
+    all_series: &mut Vec<PlotSeries>,
+) {
+    if points.is_empty() {
+        return;
+    }
+    let min_time = store
+        .entity_min_time(&query.timeline, &run.instance_path.entity_path)
+        .map_or_else(
+            || points.first().map_or(0, |p| p.time),
+            |time| time.as_i64(),
+        );
+    add_series_runs(run, points, aggregator, aggregation_factor, min_time, all_series);
+}
+
 /// Apply the given aggregation to the provided points.
 pub fn apply_aggregation(
     aggregator: AggregationPolicy,

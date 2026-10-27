@@ -8627,6 +8627,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulsar_view_time_series"
+version = "0.40.0"
+dependencies = [
+ "ahash",
+ "arrayvec",
+ "egui",
+ "egui_plot",
+ "glam",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "rayon",
+ "re_byte_size",
+ "re_chunk",
+ "re_chunk_store",
+ "re_component_ui",
+ "re_format",
+ "re_log",
+ "re_log_types",
+ "re_math",
+ "re_plot",
+ "re_query",
+ "re_renderer",
+ "re_sdk_types",
+ "re_test_context",
+ "re_test_viewport",
+ "re_tracing",
+ "re_ui",
+ "re_view",
+ "re_view_state_timeline",
+ "re_viewer_context",
+ "re_viewport_blueprint",
+ "re_workspace_hack",
+ "smallvec",
+ "vec1",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11940,6 +11977,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "poll-promise",
+ "pulsar_view_time_series",
  "rand 0.9.5",
  "re_agent_ui",
  "re_analytics",

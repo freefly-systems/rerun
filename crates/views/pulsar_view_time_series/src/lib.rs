@@ -13,6 +13,7 @@ mod markers;
 mod measurements_visualizer_system;
 mod naming;
 mod point_visualizer_system;
+mod series_cache;
 mod series_query;
 mod util;
 mod view_class;

@@ -127,7 +127,11 @@ pub(crate) fn load_line_series_with_styling(
             return Vec::new();
         }
     };
-    let query = re_chunk_store::RangeQuery::new(view_query.timeline, query_range)
+    // Pulsar: query the whole data range, not the visible one. The result, and Rerun's hash of
+    // it, then stay the same while the user zooms and pans, so the prepared points can be cached
+    // across frames (see `series_cache`). The visible range only slices them, per frame.
+    let view_range = query_range;
+    let query = re_chunk_store::RangeQuery::new(view_query.timeline, data_time_range)
         // We must fetch data with extended bounds, otherwise the query clamping would
         // cut-off the data early at the edge of the view.
         .include_extended_bounds(true);
@@ -194,6 +198,29 @@ pub(crate) fn load_line_series_with_styling(
     } else {
         all_scalar_chunks
     };
+
+    // Clears are not part of the result hash, so they go into the cache key separately.
+    let cleared_indices = collect_recursive_clears(ctx, &query, &data_result.entity_path);
+    let clears_hash = {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (time, row_id) in &cleared_indices {
+            time.as_i64().hash(&mut hasher);
+            row_id.hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    let key = crate::series_cache::Key {
+        instruction: instruction.id,
+        value_component: source.value_descriptor.component,
+        results: results.query_result_hash().hash64(),
+        clears: clears_hash,
+    };
+
+    let prepared = if let Some(prepared) = crate::series_cache::get(&key) {
+        prepared
+    } else {
+    re_tracing::profile_scope!("prepare series (cache miss)");
 
     // All the default values for a `PlotPoint`, accounting for both overrides and default values.
     // We know there's only a single value fallback for stroke width, so this is fine, albeit a bit hacky in case we add an array fallback later.
@@ -297,7 +324,6 @@ pub(crate) fn load_line_series_with_styling(
 
         re_tracing::profile_scope!("discontinuities");
 
-        let cleared_indices = collect_recursive_clears(ctx, &query, &data_result.entity_path);
         let has_discontinuities = !cleared_indices.is_empty();
 
         for points in &mut points_per_series {
@@ -336,19 +362,42 @@ pub(crate) fn load_line_series_with_styling(
         },
     );
 
+    let pyramids = points_per_series
+        .iter()
+        .map(|points| (!has_discontinuities).then(|| crate::series_cache::Pyramid::build(points)))
+        .collect();
+    let prepared = std::sync::Arc::new(crate::series_cache::Prepared {
+        points_per_series: points_per_series.into_iter().collect(),
+        pyramids,
+        names: series_names,
+        units: series_units,
+        visibility: series_visibility,
+        has_variances,
+        aggregator,
+    });
+    crate::series_cache::insert(key, std::sync::Arc::clone(&prepared));
+    prepared
+    };
+
+    // Per frame: slice the visible window, and decimate it through the pyramid when it holds
+    // many samples per pixel, so the aggregator and tessellator see O(pixels) points.
+    let (view_min, view_max) = (view_range.min().as_i64(), view_range.max().as_i64());
+    let pixels = ((view_max.saturating_sub(view_min)) as f64 / time_per_pixel.max(1e-9)).max(1.0);
+    let num_series = prepared.points_per_series.len();
     let mut series = Vec::with_capacity(num_series);
 
     re_log::debug_assert!(
-        points_per_series.len() <= series_names.len(),
+        prepared.points_per_series.len() <= prepared.names.len(),
         "Number of series names {} after processing should be at least the number of series allocated {}",
-        series_names.len(),
-        points_per_series.len()
+        prepared.names.len(),
+        prepared.points_per_series.len()
     );
-    for (instance, (points, label, unit, visible)) in itertools::izip!(
-        points_per_series,
-        series_names,
-        series_units,
-        series_visibility
+    for (instance, (points, pyramid, label, unit, visible)) in itertools::izip!(
+        &prepared.points_per_series,
+        &prepared.pyramids,
+        &prepared.names,
+        &prepared.units,
+        &prepared.visibility
     )
     .enumerate()
     {
@@ -358,22 +407,46 @@ pub(crate) fn load_line_series_with_styling(
             InstancePath::instance(data_result.entity_path.clone(), instance as u64)
         };
 
-        util::points_to_series(
-            util::SeriesProperties {
-                instance_path,
-                label,
-                unit,
-                visible,
-                has_variances,
-                visualizer_instruction_id: instruction.id,
-            },
-            time_per_pixel,
-            points,
-            ctx.recording_engine().store(),
-            view_query,
-            aggregator,
-            &mut series,
-        );
+        let (lo, hi) = crate::series_cache::window(points, view_min, view_max);
+        let samples = hi - lo;
+        let properties = util::SeriesProperties {
+            instance_path,
+            label: label.clone(),
+            unit: unit.clone(),
+            visible: *visible,
+            has_variances: prepared.has_variances,
+            visualizer_instruction_id: instruction.id,
+        };
+        let samples_per_pixel = (samples as f64 / pixels).floor() as usize;
+        let reduced = match pyramid {
+            Some(pyramid) if prepared.aggregator != AggregationPolicy::Off && samples_per_pixel >= 2 => {
+                pyramid.aggregate(points, lo, hi, samples_per_pixel, prepared.aggregator)
+            }
+            _ => None,
+        };
+        match reduced {
+            Some(reduced) => {
+                let factor = samples as f64 / reduced.len().max(1) as f64;
+                util::points_to_series_preaggregated(
+                    properties,
+                    reduced,
+                    factor,
+                    ctx.recording_engine().store(),
+                    view_query,
+                    prepared.aggregator,
+                    &mut series,
+                );
+            }
+            None => util::points_to_series(
+                properties,
+                time_per_pixel,
+                points[lo..hi].to_vec(),
+                ctx.recording_engine().store(),
+                view_query,
+                prepared.aggregator,
+                &mut series,
+            ),
+        }
     }
 
     series
