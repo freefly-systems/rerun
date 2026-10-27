@@ -14,6 +14,7 @@ mod series_query;
 mod util;
 mod view_class;
 mod visualizer_ui;
+mod y_bands;
 
 use re_sdk_types::{
     blueprint::components::VisualizerInstructionId,

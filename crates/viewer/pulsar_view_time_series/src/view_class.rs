@@ -194,6 +194,8 @@ impl ViewClass for TimeSeriesView {
         // Pulsar: StateChange entities in a chart paint as labelled time regions
         // behind it. Same visualizer type as the state timeline view.
         system_registry.register_visualizer::<re_view_state_timeline::StateVisualizer>()?;
+        // Pulsar: y-ranges (a check's accepted band) painted behind the lines.
+        system_registry.register_visualizer::<crate::y_bands::YBandsSystem>()?;
         Ok(())
     }
 
@@ -341,6 +343,10 @@ impl ViewClass for TimeSeriesView {
         {
             recommended.insert(state_visualizer, Default::default(), true);
         }
+        let y_bands = crate::y_bands::YBandsSystem::identifier();
+        if available_visualizers.contains_key(&y_bands) {
+            recommended.insert(y_bands, Default::default(), true);
+        }
 
         // If there were no other visualizers, but the SeriesLineSystem is available, use it.
         if recommended.all_recommendations().is_empty()
@@ -483,6 +489,11 @@ impl ViewClass for TimeSeriesView {
         let region_lanes: Vec<re_view_state_timeline::StateLane> = system_output
             .iter_visualizer_data::<re_view_state_timeline::StateLanesData>()
             .flat_map(|data| data.lanes.iter().cloned())
+            .collect();
+
+        let y_bands: Vec<crate::y_bands::YBand> = system_output
+            .iter_visualizer_data::<crate::y_bands::YBandsData>()
+            .flat_map(|data| data.bands.iter().cloned())
             .collect();
 
         // Pulsar: each series' source component, for the readout's raw-sample query.
@@ -836,6 +847,17 @@ impl ViewClass for TimeSeriesView {
                     state.scalar_range = Some(series_range);
                 }
             }
+            // Pulsar: like a check chart, the y range always shows its bands whole.
+            for band in &y_bands {
+                let band_range = Range1D::new(band.min, band.max);
+                state.scalar_range = Some(match state.scalar_range {
+                    Some(range) => Range1D::new(
+                        range.start().min(band_range.start()),
+                        range.end().max(band_range.end()),
+                    ),
+                    None => band_range,
+                });
+            }
 
             // Store the transform for next frame's visualizers to use.
             state.plot_transform = Some(transform);
@@ -864,6 +886,7 @@ impl ViewClass for TimeSeriesView {
                 );
             }
 
+            paint_y_bands(ui, &response, &transform, &y_bands);
             paint_region_lanes(ui, &response, &transform, time_offset, &region_lanes);
 
             // Render re_renderer draw data (already in screen space) via ViewBuilder.
@@ -1667,6 +1690,30 @@ fn nearest_raw_sample(
         }
     }
     best
+}
+
+/// Paint each y-band across the plot's full width, with its border lines if any.
+fn paint_y_bands(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    transform: &egui_plot::PlotTransform,
+    bands: &[crate::y_bands::YBand],
+) {
+    let plot = response.rect;
+    let painter = ui.painter().with_clip_rect(plot);
+    let y_of = |v: f64| transform.position_from_point(&PlotPoint::new(0.0, v)).y;
+    for band in bands {
+        let (y_top, y_bottom) = (y_of(band.max), y_of(band.min));
+        let rect = egui::Rect::from_x_y_ranges(plot.x_range(), y_top..=y_bottom).intersect(plot);
+        if rect.height() > 0.0 {
+            painter.rect_filled(rect, 0.0, band.fill);
+        }
+        if let Some(border) = band.border {
+            for y in [y_top, y_bottom] {
+                painter.hline(plot.x_range(), y, egui::Stroke::new(1.0, border));
+            }
+        }
+    }
 }
 
 /// Paint each drawn phase of the given state lanes as a translucent band over
