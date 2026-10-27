@@ -972,6 +972,7 @@ impl ViewClass for TimeSeriesView {
             // Pulsar: every chart reads out the value of each series at one shared
             // instant, the hovered time in any Pulsar chart, else the time cursor.
             update_shared_hover(ui, &response, &transform, time_offset);
+            scrub_time_cursor(ctx, ui, &response, &transform, time_offset, current_time, view_id);
             paint_pulsar_readout(
                 ctx,
                 ui,
@@ -1837,6 +1838,66 @@ fn paint_time_range_highlight(
 struct SharedHover {
     time: i64,
     pass: u64,
+}
+
+/// Pulsar's cursor: hovering a Pulsar chart moves the time cursor, so every
+/// other view (3D, map, text log) shows that instant; leaving the charts puts
+/// the cursor back where it was parked. A click parks it at the hovered time.
+/// While playback runs, the playhead owns the cursor.
+#[derive(Clone, Default)]
+struct Scrub {
+    /// Each Pulsar chart's plot rect and the pass it was last drawn in.
+    charts: Vec<(re_viewer_context::ViewId, egui::Rect, u64)>,
+    /// Where the cursor goes back to when the pointer leaves the charts;
+    /// `Some` while a hover is scrubbing.
+    parked: Option<i64>,
+}
+
+fn scrub_id() -> egui::Id {
+    egui::Id::NULL.with("pulsar_scrub")
+}
+
+fn scrub_time_cursor(
+    ctx: &ViewerContext<'_>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    transform: &egui_plot::PlotTransform,
+    time_offset: i64,
+    current_time: Option<i64>,
+    view_id: re_viewer_context::ViewId,
+) {
+    use re_viewer_context::TimeControlCommand;
+    let pass = ui.ctx().cumulative_pass_nr();
+    let mut scrub = ui.ctx().data(|d| d.get_temp::<Scrub>(scrub_id())).unwrap_or_default();
+    scrub.charts.retain(|(id, _, seen)| *id != view_id && seen + 1 >= pass);
+    scrub.charts.push((view_id, response.rect, pass));
+
+    let playing = ctx.time_ctrl.play_state() != re_sdk_types::blueprint::components::PlayState::Paused;
+    let pointer = ui.ctx().pointer_hover_pos();
+    let hovered = pointer.filter(|p| response.rect.contains(*p) && response.hovered());
+    if playing {
+        scrub.parked = None;
+    } else if let Some(pos) = hovered {
+        let time = time_offset.saturating_add(transform.value_from_position(pos).x.round() as i64);
+        if scrub.parked.is_none() {
+            scrub.parked = current_time;
+        }
+        if response.clicked() || response.secondary_clicked() {
+            scrub.parked = Some(time);
+        }
+        if current_time != Some(time) {
+            ctx.send_time_commands([TimeControlCommand::SetTimeClamped(re_log_types::TimeReal::from(time))]);
+        }
+    } else if let Some(parked) = scrub.parked
+        && !pointer.is_some_and(|p| scrub.charts.iter().any(|(_, rect, _)| rect.contains(p)))
+    {
+        // The pointer left every chart: back to the parked cursor.
+        scrub.parked = None;
+        if current_time != Some(parked) {
+            ctx.send_time_commands([TimeControlCommand::SetTimeClamped(re_log_types::TimeReal::from(parked))]);
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(scrub_id(), scrub));
 }
 
 fn shared_hover_id() -> egui::Id {
