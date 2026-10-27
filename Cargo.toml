@@ -161,6 +161,7 @@ re_view_tensor = { path = "crates/viewer/re_view_tensor", version = "0.34.1", de
 re_view_text_document = { path = "crates/viewer/re_view_text_document", version = "0.34.1", default-features = false }
 re_view_text_log = { path = "crates/viewer/re_view_text_log", version = "0.34.1", default-features = false }
 re_view_time_series = { path = "crates/viewer/re_view_time_series", version = "0.34.1", default-features = false }
+pulsar_view_time_series = { path = "crates/viewer/pulsar_view_time_series", version = "0.34.1", default-features = false }
 re_viewer = { path = "crates/viewer/re_viewer", version = "0.34.1", default-features = false }
 re_viewer_context = { path = "crates/viewer/re_viewer_context", version = "0.34.1", default-features = false }
 re_viewer_mcp = { path = "crates/viewer/re_viewer_mcp", version = "0.34.1", default-features = false }
