@@ -6,6 +6,7 @@
 
 mod aggregation;
 mod check_stats;
+mod h_lines;
 mod fallbacks;
 mod line_visualizer_system;
 mod markers;

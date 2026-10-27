@@ -202,7 +202,16 @@ pub const BAR_HEIGHT: f32 = 20.0;
 
 /// The stat bar, in Pulsar's layout: LABEL value limit, with a dot on
 /// clickable cards. Clicking toggles `active`.
-pub fn stat_bar_ui(ui: &mut egui::Ui, cards: &[StatCard], active: &mut Option<usize>) {
+pub fn stat_bar_ui(
+    ui: &mut egui::Ui,
+    cards: &[StatCard],
+    chips: &[crate::h_lines::HLine],
+    active: &mut Option<usize>,
+) {
+    let active_hline = active
+        .and_then(|i| cards.get(i))
+        .map(|card| card.hline_ref.clone())
+        .unwrap_or_default();
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         ui.spacing_mut().item_spacing.x = 10.0;
@@ -241,6 +250,23 @@ pub fn stat_bar_ui(ui: &mut egui::Ui, cards: &[StatCard], active: &mut Option<us
                 response.on_hover_cursor(egui::CursorIcon::PointingHand);
             }
         }
+
+        // Threshold-line chips, right-aligned, as in Pulsar's stats row.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(6.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for line in chips.iter().rev().filter(|l| !l.label.is_empty()) {
+                // Right-to-left: add the label first so the swatch sits on its left.
+                ui.horizontal(|ui| {
+                    crate::h_lines::chip_ui(
+                        ui,
+                        line,
+                        !active_hline.is_empty() && line.label == active_hline,
+                    );
+                });
+                ui.add_space(6.0);
+            }
+        });
     });
 }
 

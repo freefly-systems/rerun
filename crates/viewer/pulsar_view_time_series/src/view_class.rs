@@ -202,6 +202,8 @@ impl ViewClass for TimeSeriesView {
         system_registry.register_visualizer::<crate::y_bands::YBandsSystem>()?;
         // Pulsar: a check's stat cards, in a bar under the chart.
         system_registry.register_visualizer::<crate::check_stats::CheckStatsSystem>()?;
+        // Pulsar: a check's threshold lines, drawn by the view.
+        system_registry.register_visualizer::<crate::h_lines::HLinesSystem>()?;
         Ok(())
     }
 
@@ -352,6 +354,14 @@ impl ViewClass for TimeSeriesView {
         let y_bands = crate::y_bands::YBandsSystem::identifier();
         if available_visualizers.contains_key(&y_bands) {
             recommended.insert(y_bands, Default::default(), true);
+        }
+        let h_lines = crate::h_lines::HLinesSystem::identifier();
+        if available_visualizers.contains_key(&h_lines)
+            && indicated_entities_per_visualizer
+                .get(&h_lines)
+                .is_some_and(|entities| entities.contains(entity_path))
+        {
+            recommended.insert(h_lines, Default::default(), true);
         }
         let check_stats = crate::check_stats::CheckStatsSystem::identifier();
         if available_visualizers.contains_key(&check_stats)
@@ -510,6 +520,10 @@ impl ViewClass for TimeSeriesView {
             .flat_map(|data| data.bands.iter().cloned())
             .collect();
 
+        let h_lines: Vec<crate::h_lines::HLine> = system_output
+            .iter_visualizer_data::<crate::h_lines::HLinesData>()
+            .flat_map(|data| data.lines.iter().cloned())
+            .collect();
         let check_cards: Vec<crate::check_stats::StatCard> = system_output
             .iter_visualizer_data::<crate::check_stats::CheckStatsData>()
             .flat_map(|data| data.cards.iter().cloned())
@@ -809,7 +823,8 @@ impl ViewClass for TimeSeriesView {
             plot = plot.link_cursor(timeline.name().as_str(), [true; 2]);
 
             // Pulsar: leave room under the plot for the check's stat bar.
-            if !check_cards.is_empty() {
+            let has_stat_bar = !check_cards.is_empty() || h_lines.iter().any(|l| !l.label.is_empty());
+            if has_stat_bar {
                 plot = plot.height(
                     (ui.available_height() - crate::check_stats::BAR_HEIGHT).max(40.0),
                 );
@@ -876,9 +891,10 @@ impl ViewClass for TimeSeriesView {
                     state.scalar_range = Some(series_range);
                 }
             }
-            // Pulsar: like a check chart, the y range always shows its bands whole.
-            for band in &y_bands {
-                let band_range = Range1D::new(band.min, band.max);
+            // Pulsar: like a check chart, the y range always shows its bands and
+            // threshold lines whole.
+            let line_ranges = h_lines.iter().map(|l| Range1D::new(l.y, l.y));
+            for band_range in y_bands.iter().map(|b| Range1D::new(b.min, b.max)).chain(line_ranges) {
                 state.scalar_range = Some(match state.scalar_range {
                     Some(range) => Range1D::new(
                         range.start().min(band_range.start()),
@@ -921,6 +937,13 @@ impl ViewClass for TimeSeriesView {
             // Render re_renderer draw data (already in screen space) via ViewBuilder.
             render_re_renderer_draw_data(ctx, ui, &response, re_renderer_draw_data);
 
+            crate::h_lines::paint_h_lines(
+                ui,
+                response.rect,
+                |y| transform.position_from_point(&PlotPoint::new(0.0, y)).y,
+                &h_lines,
+            );
+
             // Pulsar: the active stat card's violations or threshold line, on top.
             if let Some(card) = state.pulsar_active_card.and_then(|i| check_cards.get(i)) {
                 let to_screen = |t: i64, v: f64| {
@@ -930,11 +953,18 @@ impl ViewClass for TimeSeriesView {
                     ))
                 };
                 crate::check_stats::paint_violations(ui, response.rect, to_screen, card);
-                if let Some(line) = all_plot_series
-                    .iter()
-                    .find(|s| !card.hline_ref.is_empty() && s.label == card.hline_ref)
-                    && let Some(&(_, y)) = line.points.first()
-                {
+                // The referenced threshold: a Pulsar line, else a two-point series.
+                let referenced_y = (!card.hline_ref.is_empty())
+                    .then(|| {
+                        h_lines.iter().find(|l| l.label == card.hline_ref).map(|l| l.y).or_else(|| {
+                            all_plot_series
+                                .iter()
+                                .find(|s| s.label == card.hline_ref)
+                                .and_then(|s| s.points.first().map(|&(_, y)| y))
+                        })
+                    })
+                    .flatten();
+                if let Some(y) = referenced_y {
                     crate::check_stats::paint_highlighted_hline(
                         ui,
                         response.rect,
@@ -1136,8 +1166,13 @@ impl ViewClass for TimeSeriesView {
             }
 
             // Pulsar: the check's stat bar, under the plot.
-            if !check_cards.is_empty() {
-                crate::check_stats::stat_bar_ui(ui, &check_cards, &mut state.pulsar_active_card);
+            if has_stat_bar {
+                crate::check_stats::stat_bar_ui(
+                    ui,
+                    &check_cards,
+                    &h_lines,
+                    &mut state.pulsar_active_card,
+                );
             }
 
             Ok(())
