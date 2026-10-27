@@ -83,6 +83,13 @@ fn populate_view_class_registry_with_builtin(
         app_options,
         fallback_registry,
     )?;
+    // Pulsar's time-series view. The web entry point has no hook for extra view
+    // classes (rerun-io/rerun#2337), so the Pulsar viewer registers it here.
+    view_class_registry.add_class::<pulsar_view_time_series::TimeSeriesView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
     view_class_registry.add_class::<re_view_state_timeline::StateTimelineView>(
         reflection,
         app_options,
