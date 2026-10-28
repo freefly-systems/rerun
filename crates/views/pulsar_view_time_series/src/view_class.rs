@@ -970,7 +970,7 @@ impl ViewClass for TimeSeriesView {
             // Pulsar: the hovered time is shared, so every Pulsar chart draws its cursor there,
             // as Pulsar's synced cursors do. Hovering leaves the time cursor alone; a click moves it.
             update_shared_hover(ui, &response, &transform, time_offset);
-            paint_shared_hover(ui, &response, &transform, &all_plot_series, time_offset);
+            paint_shared_hover(ui, &response, &transform, &all_plot_series, time_offset, time_type, timestamp_format);
 
             // Can determine whether we're resetting only now since we need to know whether there's a plot item hovered.
             let is_resetting = plot_double_clicked && hovered_data_result.is_none();
@@ -1854,14 +1854,17 @@ fn update_shared_hover(
 }
 
 /// Pulsar's synced cursor: a line at the shared hover time in every Pulsar chart and, in the
-/// charts not under the pointer, a dot on each series there. The hovered chart's tooltip draws its
-/// own dots and lists every value (`TooltipMode::All`, this view's default).
+/// charts not under the pointer, a dot on each series there and the values window beside the line.
+/// The hovered chart's own tooltip draws its dots and values (`TooltipMode::All`, this view's
+/// default), so every chart reads out the same instant, as Pulsar's charts do.
 fn paint_shared_hover(
     ui: &egui::Ui,
     response: &egui::Response,
     transform: &egui_plot::PlotTransform,
     all_plot_series: &[&crate::PlotSeries],
     time_offset: i64,
+    time_type: TimeType,
+    timestamp_format: re_log_types::TimestampFormat,
 ) {
     let Some(time) = shared_hover_time(ui) else {
         return;
@@ -1878,6 +1881,10 @@ fn paint_shared_hover(
     if response.hover_pos().is_some_and(|pos| response.rect.contains(pos)) {
         return;
     }
+    // As many rows as the hovered chart's tooltip shows
+    const MAX_ROWS: usize = 10;
+    let mut rows = Vec::new();
+    let mut num_series = 0_usize;
     for series in all_plot_series.iter().filter(|series| series.visible) {
         let (Some(&(first, _)), Some(&(last, _))) = (series.points.first(), series.points.last()) else {
             continue;
@@ -1890,8 +1897,61 @@ fn paint_shared_hover(
         {
             let point = transform.position_from_point(&PlotPoint::new(time.saturating_sub(time_offset) as f64, value));
             painter.circle_filled(point, 3.0, series.color);
+            num_series += 1;
+            if rows.len() < MAX_ROWS {
+                rows.push((tooltip_series_label(series), tooltip_series_value(series, value), series.color));
+            }
         }
     }
+    if !rows.is_empty() {
+        let header = format_time_for_tooltip(time, time_type, timestamp_format);
+        show_values_beside_cursor(ui, response.id.with("pulsar_shared_hover_values"), frame, x, &header, &rows, num_series - rows.len());
+    }
+}
+
+/// The values window of a chart the pointer is not over: Rerun's plot tooltip rows, in a popup
+/// at the top of the plot beside the cursor line, on the side with more room.
+fn show_values_beside_cursor(
+    ui: &egui::Ui,
+    id: egui::Id,
+    frame: egui::Rect,
+    x: f32,
+    header: &str,
+    rows: &[(String, String, egui::Color32)],
+    num_omitted: usize,
+) {
+    const GAP: f32 = 8.0;
+    let (pivot, anchor) = if x > frame.center().x {
+        (egui::Align2::RIGHT_TOP, egui::pos2(x - GAP, frame.top() + GAP))
+    } else {
+        (egui::Align2::LEFT_TOP, egui::pos2(x + GAP, frame.top() + GAP))
+    };
+    egui::Area::new(id)
+        .order(egui::Order::Tooltip)
+        .pivot(pivot)
+        .fixed_pos(anchor)
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                // The same header and rows as re_plot's plot tooltip
+                let tokens = ui.tokens();
+                ui.label(
+                    egui::RichText::new(header)
+                        .size(re_ui::DesignTokens::combo_item_small_font_size())
+                        .color(tokens.text_default),
+                );
+                ui.add_space(tokens.text_to_icon_padding());
+                for (label, value, color) in rows {
+                    re_plot::tooltip::plot_tooltip_label_value(ui, label, value, *color);
+                }
+                if num_omitted > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("… and {num_omitted} more"))
+                            .color(tokens.list_item_noninteractive_text),
+                    );
+                }
+            });
+        });
 }
 
 /// The shared hover time, if some Pulsar view was hovered this frame or the last.
