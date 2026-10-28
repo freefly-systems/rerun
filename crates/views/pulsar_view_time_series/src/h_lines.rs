@@ -1,6 +1,6 @@
 //! Pulsar's threshold lines: a check's horizontal limits (`hLines` in Pulsar's
 //! `CheckVisualizerData`). Drawn by the view on top of the series, solid or
-//! dashed, kept out of the legend and the readout, and listed as chips in the
+//! dashed, kept out of the legend and the tooltip, and listed as chips in the
 //! stat bar, as Pulsar's check charts do.
 //!
 //! Stored as a Pulsar archetype, `pulsar.archetypes.HLines`, built from Rerun

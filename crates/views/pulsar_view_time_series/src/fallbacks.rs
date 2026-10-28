@@ -157,6 +157,13 @@ pub fn register_fallbacks(system_registry: &mut re_viewer_context::ViewSystemReg
         |_ctx| true.into(),
     );
 
+    // Pulsar: hovering lists every series' value at the hovered time in Rerun's tooltip, with a
+    // dot on each line, as Pulsar's charts do; a blueprint can still choose `Nearest`.
+    system_registry.register_fallback_provider::<re_sdk_types::blueprint::components::TooltipMode>(
+        re_sdk_types::blueprint::archetypes::PlotInteraction::descriptor_tooltip_mode().component,
+        |_ctx| re_sdk_types::blueprint::components::TooltipMode::All,
+    );
+
     system_registry.register_fallback_provider(
         TimeAxis::descriptor_view_range().component,
         |ctx| -> re_sdk_types::blueprint::components::TimeRange {

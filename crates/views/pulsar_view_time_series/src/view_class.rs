@@ -501,9 +501,6 @@ impl ViewClass for TimeSeriesView {
             state.pulsar_active_card = None;
         }
 
-        // Pulsar: each series' source component, for the readout's raw-sample query.
-        let mut series_sources: HashMap<_, (ComponentIdentifier, bool)> = HashMap::default();
-
         state.num_time_series_last_frame_per_instruction.clear();
 
         let view_query_result = ctx.lookup_query_result(query.view_id);
@@ -545,7 +542,6 @@ impl ViewClass for TimeSeriesView {
                         })
                         .unwrap_or((value_component, String::new()));
 
-                    series_sources.insert(instruction_id, (component, selector.is_empty()));
                     series_names.insert(
                         instruction_id,
                         SeriesInfo::new(
@@ -799,7 +795,9 @@ impl ViewClass for TimeSeriesView {
                 transform,
                 hovered_plot_item: _,
             } = plot.show(ui, |plot_ui| {
-                if plot_ui.response().secondary_clicked()
+                // Pulsar: a click places the time cursor, like Pulsar's persistent cursor;
+                // upstream does this on a right click only.
+                if (plot_ui.response().clicked() || plot_ui.response().secondary_clicked())
                     && let Some(pointer) = plot_ui.pointer_coordinate()
                 {
                     let time = re_log_types::TimeReal::from(pointer.x as i64 + time_offset);
@@ -969,24 +967,10 @@ impl ViewClass for TimeSeriesView {
                 &mut new_view_time_range,
             );
 
-            // Pulsar: every chart reads out the value of each series at one shared
-            // instant, the hovered time in any Pulsar chart, else the time cursor.
+            // Pulsar: the hovered time is shared, so every Pulsar chart draws its cursor there,
+            // as Pulsar's synced cursors do. Hovering leaves the time cursor alone; a click moves it.
             update_shared_hover(ui, &response, &transform, time_offset);
-            scrub_time_cursor(ctx, ui, &response, &transform, time_offset, current_time, view_id);
-            paint_pulsar_readout(
-                ctx,
-                ui,
-                &response,
-                &transform,
-                &all_plot_series,
-                &series_sources,
-                *timeline.name(),
-                state.time_per_pixel,
-                time_offset,
-                time_type,
-                timestamp_format,
-                current_time,
-            );
+            paint_shared_hover(ui, &response, &transform, &all_plot_series, time_offset);
 
             // Can determine whether we're resetting only now since we need to know whether there's a plot item hovered.
             let is_resetting = plot_double_clicked && hovered_data_result.is_none();
@@ -1830,74 +1814,14 @@ fn paint_time_range_highlight(
     );
 }
 
-// ── Pulsar cursor readout ─────────────────────────────────────────────────
+// ── Pulsar synced cursor ──────────────────────────────────────────────────
 
-/// The hover time shared by every Pulsar time-series view, so all charts read
-/// out the same instant, like Pulsar's synced crosshair.
+/// The hover time shared by every Pulsar time-series view, so all charts draw
+/// their cursor at the same instant, like Pulsar's synced crosshair.
 #[derive(Clone, Copy)]
 struct SharedHover {
     time: i64,
     pass: u64,
-}
-
-/// Pulsar's cursor: hovering a Pulsar chart moves the time cursor, so every
-/// other view (3D, map, text log) shows that instant; leaving the charts puts
-/// the cursor back where it was parked. A click parks it at the hovered time.
-/// While playback runs, the playhead owns the cursor.
-#[derive(Clone, Default)]
-struct Scrub {
-    /// Each Pulsar chart's plot rect and the pass it was last drawn in.
-    charts: Vec<(re_viewer_context::ViewId, egui::Rect, u64)>,
-    /// Where the cursor goes back to when the pointer leaves the charts;
-    /// `Some` while a hover is scrubbing.
-    parked: Option<i64>,
-}
-
-fn scrub_id() -> egui::Id {
-    egui::Id::NULL.with("pulsar_scrub")
-}
-
-fn scrub_time_cursor(
-    ctx: &ViewerContext<'_>,
-    ui: &egui::Ui,
-    response: &egui::Response,
-    transform: &egui_plot::PlotTransform,
-    time_offset: i64,
-    current_time: Option<i64>,
-    view_id: re_viewer_context::ViewId,
-) {
-    use re_viewer_context::TimeControlCommand;
-    let pass = ui.ctx().cumulative_pass_nr();
-    let mut scrub = ui.ctx().data(|d| d.get_temp::<Scrub>(scrub_id())).unwrap_or_default();
-    scrub.charts.retain(|(id, _, seen)| *id != view_id && seen + 1 >= pass);
-    scrub.charts.push((view_id, response.rect, pass));
-
-    let playing = ctx.time_ctrl.play_state() != re_sdk_types::blueprint::components::PlayState::Paused;
-    let pointer = ui.ctx().pointer_hover_pos();
-    let hovered = pointer.filter(|p| response.rect.contains(*p) && response.hovered());
-    if playing {
-        scrub.parked = None;
-    } else if let Some(pos) = hovered {
-        let time = time_offset.saturating_add(transform.value_from_position(pos).x.round() as i64);
-        if scrub.parked.is_none() {
-            scrub.parked = current_time;
-        }
-        if response.clicked() || response.secondary_clicked() {
-            scrub.parked = Some(time);
-        }
-        if current_time != Some(time) {
-            ctx.send_time_commands([TimeControlCommand::SetTimeClamped(re_log_types::TimeReal::from(time))]);
-        }
-    } else if let Some(parked) = scrub.parked
-        && !pointer.is_some_and(|p| scrub.charts.iter().any(|(_, rect, _)| rect.contains(p)))
-    {
-        // The pointer left every chart: back to the parked cursor.
-        scrub.parked = None;
-        if current_time != Some(parked) {
-            ctx.send_time_commands([TimeControlCommand::SetTimeClamped(re_log_types::TimeReal::from(parked))]);
-        }
-    }
-    ui.ctx().data_mut(|d| d.insert_temp(scrub_id(), scrub));
 }
 
 fn shared_hover_id() -> egui::Id {
@@ -1929,6 +1853,47 @@ fn update_shared_hover(
     }
 }
 
+/// Pulsar's synced cursor: a line at the shared hover time in every Pulsar chart and, in the
+/// charts not under the pointer, a dot on each series there. The hovered chart's tooltip draws its
+/// own dots and lists every value (`TooltipMode::All`, this view's default).
+fn paint_shared_hover(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    transform: &egui_plot::PlotTransform,
+    all_plot_series: &[&crate::PlotSeries],
+    time_offset: i64,
+) {
+    let Some(time) = shared_hover_time(ui) else {
+        return;
+    };
+    let frame = *transform.frame();
+    let x = transform
+        .position_from_point(&PlotPoint::new(time.saturating_sub(time_offset) as f64, 0.0))
+        .x;
+    if !frame.x_range().contains(x) {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(frame);
+    painter.vline(x, frame.y_range(), egui::Stroke::new(1.0, ui.visuals().text_color().gamma_multiply(0.4)));
+    if response.hover_pos().is_some_and(|pos| response.rect.contains(pos)) {
+        return;
+    }
+    for series in all_plot_series.iter().filter(|series| series.visible) {
+        let (Some(&(first, _)), Some(&(last, _))) = (series.points.first(), series.points.last()) else {
+            continue;
+        };
+        if time < first || time > last {
+            continue;
+        }
+        if let Some(value) = tooltip_value_at_hover(&series.points, series.kind, time)
+            && value.is_finite()
+        {
+            let point = transform.position_from_point(&PlotPoint::new(time.saturating_sub(time_offset) as f64, value));
+            painter.circle_filled(point, 3.0, series.color);
+        }
+    }
+}
+
 /// The shared hover time, if some Pulsar view was hovered this frame or the last.
 fn shared_hover_time(ui: &egui::Ui) -> Option<i64> {
     let pass = ui.ctx().cumulative_pass_nr();
@@ -1936,164 +1901,6 @@ fn shared_hover_time(ui: &egui::Ui) -> Option<i64> {
         .data(|d| d.get_temp::<SharedHover>(shared_hover_id()))
         .filter(|h| h.pass + 1 >= pass)
         .map(|h| h.time)
-}
-
-/// Paint a crosshair at the readout time and, top left, each visible series'
-/// value nearest that time with the sample's own timestamp. A `~` marks a value
-/// taken from aggregated points, which happens when zoomed out.
-#[expect(clippy::too_many_arguments)]
-fn paint_pulsar_readout(
-    ctx: &ViewerContext<'_>,
-    ui: &egui::Ui,
-    response: &egui::Response,
-    transform: &egui_plot::PlotTransform,
-    all_plot_series: &[&crate::PlotSeries],
-    series_sources: &HashMap<re_sdk_types::blueprint::components::VisualizerInstructionId, (ComponentIdentifier, bool)>,
-    timeline: re_log_types::TimelineName,
-    time_per_pixel: f64,
-    time_offset: i64,
-    time_type: TimeType,
-    timestamp_format: re_log_types::TimestampFormat,
-    current_time: Option<i64>,
-) {
-    let hover = shared_hover_time(ui);
-    let Some(time) = hover.or(current_time) else {
-        return;
-    };
-    let painter = ui.painter().with_clip_rect(response.rect);
-
-    if hover.is_some() {
-        let x = transform
-            .position_from_point(&PlotPoint::new(time.saturating_sub(time_offset) as f64, 0.0))
-            .x;
-        if response.rect.x_range().contains(x) {
-            painter.vline(
-                x,
-                response.rect.y_range(),
-                egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
-            );
-        }
-    }
-
-    let format_time = |t: i64| {
-        let format = if time_type == TimeType::TimestampNs {
-            timestamp_format.with_date_visibility(re_log_types::DateVisibility::HideDate)
-        } else {
-            timestamp_format
-        };
-        time_type.format(re_log_types::TimeInt::new_temporal(t), format)
-    };
-
-    let font = egui::FontId::monospace(11.0);
-    let small = egui::FontId::monospace(10.0);
-    let strong = ui.visuals().strong_text_color();
-    let weak = ui.visuals().weak_text_color();
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        &format_time(time),
-        0.0,
-        egui::TextFormat::simple(font.clone(), egui::Color32::from_rgb(242, 204, 96)),
-    );
-
-    for series in all_plot_series
-        .iter()
-        .filter(|s| s.visible && !matches!(s.kind, PlotSeriesKind::Clear) && !s.points.is_empty())
-    {
-        let points = &series.points;
-        let i = points.partition_point(|(t, _)| *t < time);
-        let i = if i == points.len()
-            || (i > 0 && time.abs_diff(points[i - 1].0) <= time.abs_diff(points[i].0))
-        {
-            i - 1
-        } else {
-            i
-        };
-        let plotted = points[i];
-        let downsampled =
-            series.aggregator != re_sdk_types::components::AggregationPolicy::Off
-                && series.aggregation_factor > 1.0;
-
-        // Plotted points are raw samples unless the series is downsampled. Then
-        // the nearest raw sample sits within a few pixels of the readout time.
-        let raw = downsampled
-            .then(|| series_sources.get(&series.visualizer_instruction_id))
-            .flatten()
-            .filter(|(component, no_selector)| {
-                *no_selector && *component == Scalars::descriptor_scalars().component
-            })
-            .and_then(|(component, _)| {
-                let window = (time_per_pixel * 3.0).ceil() as i64 + 1;
-                nearest_raw_sample(ctx, timeline, series, *component, time, window)
-            });
-        let aggregated = downsampled && raw.is_none();
-        let (sample_time, value) = raw.unwrap_or(plotted);
-
-        job.append("   ", 0.0, egui::TextFormat::simple(font.clone(), weak));
-        job.append(&series.label, 0.0, egui::TextFormat::simple(font.clone(), series.color));
-        job.append(
-            &format!(" {}{}", if aggregated { "~" } else { "" }, compact_value(value)),
-            0.0,
-            egui::TextFormat::simple(font.clone(), strong),
-        );
-        job.append(
-            &format!(" @{}", format_time(sample_time)),
-            0.0,
-            egui::TextFormat::simple(small.clone(), weak),
-        );
-    }
-
-    job.wrap = egui::text::TextWrapping {
-        max_width: (response.rect.width() - 16.0).max(40.0),
-        max_rows: 2,
-        break_anywhere: false,
-        overflow_character: Some('…'),
-    };
-    let galley = painter.layout_job(job);
-    let pos = response.rect.left_top() + egui::vec2(8.0, 6.0);
-    let bg = egui::Rect::from_min_size(pos, galley.size()).expand(3.0);
-    painter.rect_filled(bg, 3.0, ui.visuals().extreme_bg_color.gamma_multiply(0.85));
-    painter.galley(pos, galley, strong);
-}
-
-/// The raw sample of `series` nearest `time`, from a range query of `window`
-/// either side. `None` when no sample falls in the window.
-fn nearest_raw_sample(
-    ctx: &ViewerContext<'_>,
-    timeline: re_log_types::TimelineName,
-    series: &crate::PlotSeries,
-    component: ComponentIdentifier,
-    time: i64,
-    window: i64,
-) -> Option<(i64, f64)> {
-    let query = re_chunk_store::RangeQuery::new(
-        timeline,
-        AbsoluteTimeRange::new(time.saturating_sub(window), time.saturating_add(window)),
-    );
-    let engine = ctx.recording_engine();
-    let results = engine.cache().range(
-        re_chunk_store::ChunkTrackingMode::Ignore,
-        &query,
-        &series.instance_path.entity_path,
-        [component],
-    );
-    let instance = series.instance_path.instance;
-    let index = if instance.is_specific() { instance.get() as usize } else { 0 };
-
-    let mut best: Option<(i64, f64)> = None;
-    for chunk in results.get(component)? {
-        for ((t, _row), values) in std::iter::zip(
-            chunk.iter_component_indices(timeline, component),
-            chunk.iter_slices::<f64>(component),
-        ) {
-            let (t, Some(&value)) = (t.as_i64(), values.get(index)) else {
-                continue;
-            };
-            if best.is_none_or(|(bt, _)| t.abs_diff(time) < bt.abs_diff(time)) {
-                best = Some((t, value));
-            }
-        }
-    }
-    best
 }
 
 /// Paint each y-band across the plot's full width, with its border lines if any.
@@ -2180,22 +1987,6 @@ fn paint_region_lanes(
         );
         painter.galley(at, galley, ui.visuals().strong_text_color());
     }
-}
-
-/// Four significant digits, like Pulsar's legend; scientific outside 1e-3..1e5.
-fn compact_value(v: f64) -> String {
-    if !v.is_finite() {
-        return format!("{v}");
-    }
-    if v == 0.0 {
-        return "0".to_owned();
-    }
-    let a = v.abs();
-    if !(1e-3..1e5).contains(&a) {
-        return format!("{v:.3e}");
-    }
-    let decimals = (3 - a.log10().floor() as i32).max(0) as usize;
-    format!("{v:.decimals$}")
 }
 
 fn paint_time_cursor(

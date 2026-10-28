@@ -176,8 +176,8 @@ pub fn points_to_series(
 
 /// Pulsar: like [`points_to_series`], for points already reduced to about one bucket per
 /// pixel by the series cache's pyramid, so the per-pixel aggregation pass is skipped.
-/// `aggregation_factor` is samples per emitted point, which the readout uses to tell
-/// plotted from raw values.
+/// `aggregation_factor` is samples per emitted point, which the tooltip uses to name the
+/// aggregator.
 #[expect(clippy::too_many_arguments)]
 pub fn points_to_series_preaggregated(
     run: SeriesProperties,
